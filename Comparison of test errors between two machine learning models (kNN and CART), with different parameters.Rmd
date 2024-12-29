@@ -287,7 +287,6 @@ abline(a = 0, b = 1, col = "gray", lty = 2)
 par(mfrow = c(1, 1))
 
 ```
-Qt13:
 
 - $1-NN$ perfect performance $(AUC = 1.0)$. This suggests the model perfectly separates the classes. this is consistent with $1-NN'$s nature, as it overfits to training data and memorizes all points. As expected, perfect training accuracy and overfitting result in an excellent ROC curve. However, this may not generalize well to unseen data.
 
