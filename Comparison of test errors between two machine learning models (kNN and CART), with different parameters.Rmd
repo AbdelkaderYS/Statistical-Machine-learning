@@ -1,0 +1,384 @@
+---
+title: "kNN and CART models implementation"
+author: "Abdelkader YOUNOUSSI SALEY"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Comparison of test errors between two machine learning models (kNN and CART), with different parameters.
+```{r}
+# Necessary libraries
+library(class)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(ROCR)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(gridExtra)
+library(corrplot)
+#library(kruskal.test)
+library(pROC)
+set.seed(19671210)
+```
+
+We are going to work with prostate data.
+```{r}
+# Load data
+prostate <- read.csv('prostate-cancer-1.csv')
+data <- prostate
+dim(data)
+class(data$Y) # Integer
+
+# Transform Y as factor
+prostate$Y <- as.factor(prostate$Y)
+```
+The dataset is high-dimensional with far more features than samples ($79$ samples for $501$ features (including the response variable Y) as ```factor```), a characteristic common in DNA microarray data.
+
+```{r}
+# str(prostate) # Uncomment to see the result
+```
+
+From a statistical perspective, the input space in this dataset consists of continuous(```num```) variables representing DNA microarray gene expression levels. These features are numerical and high-dimensional. The data likely exhibits variability across genes, which may correlate with the response variable $Y$.
+
+Distribution plot of Y
+```{r}
+freq <- table(prostate$Y)
+percent <- round(100 * freq / sum(freq), 1)
+
+barplot(freq, main = "Distribution of Response Variable",
+    xlab = "Class", ylab = "Frequency",
+    col = c("orange", "brown"),
+    ylim = c(0, max(freq) + 10)
+  )
+text(x = barplot(freq, plot = FALSE), y = freq,
+    labels = paste0(percent, "%"),
+    pos = 3, cex = 0.8, col = "black")
+```
+
+The response variable $Y$ is nearly balanced, with a slightly higher proportion of cancer samples (1).
+
+
+Now we are going to identify the $9$ most powerful predictor variables individually with respect to the response according to the Kruskal-Wallis test statistic.
+
+```{r}
+X <- prostate %>% select(-Y)  # Select all columns except Y
+y <- prostate$Y
+
+# Perform Kruskal-Wallis test
+kruskal_test <- sapply(names(X), function(col) {
+  kruskal.test(X[[col]] ~ y)$statistic
+})
+
+# Sort the results
+s_kr1 <- sort(kruskal_test, decreasing = TRUE)
+t9_feats <- s_kr1[1:9]
+t9_feats
+```
+As we can see, we can interpret this result by saying that higher chi-squared values indicate a stronger association between the feature and the response variable. ```X217844_at``` has the highest chi-squared value of $14.91$, suggesting it is the most statistically significant feature among those listed.
+Features with chi-squared values like $12.65$ (```X211935_at```), $12.51$ (```X212640_at```), and others also show notable associations with the response, though not as strong as ```X217844_at```.
+In short, these features (from ```X217844_at``` to ```X214001_x_at```) show varying degrees of association with the response variable, with the first feature being the most significant based on the Kruskal-Wallis chi-squared statistic.
+
+
+```{r}
+# top_9_features <- gsub("\\.Kruskal-Wallis chi-squared", "",top_9_features)
+t9_feats <- c( "X217844_at" = 14.90820, "X211935_at" = 12.64903,
+  "X212640_at" = 12.50965, "X201290_at" = 12.23320, 
+  "X215333_x_at" = 12.16458, "X201480_s_at" = 12.02790,
+  "X209454_s_at" = 11.48890, "X200047_s_at" = 11.02741,
+  "X214001_x_at" = 10.57539
+)
+
+# Data frame for the tt9_feats
+t9_df <- data.frame( feature = names(t9_feats),
+  statistic = t9_feats)
+
+# Color for plot
+colors <- colorRampPalette(c("darkred", "orange", "yellow"))(length(t9_df$statistic))
+
+t9_df$feature <- factor(t9_df$feature, levels = t9_df$feature)
+# 'h' plot
+plot(as.numeric(t9_df$feature), t9_df$statistic, type = "h",                 
+     lwd = 2, col = colors, main = "Kruskal-Wallis Test Statistics",
+     xlab = "Variable Name", ylab = "Kruskal-Wallis Statistic", xaxt = "n")
+
+axis(1, at = 1:length(t9_df$feature), labels = FALSE) 
+text(x = 1:length(t9_df$feature), y = par("usr")[3] - 0.2, labels = t9_df$feature, 
+     srt = 45, adj = 1, xpd = TRUE)             
+```
+
+```{r}
+# Generate comparative boxplots
+par(mfrow = c(3, 3))
+for (j in names(t9_feats)) {
+  boxplot(X[[j]] ~ y, main = j, 
+          xlab = "prostate$Y", ylab = "Value", 
+          col = c("lightblue", "lightcoral"), 
+          names = c("Cancer", "Non-Cancer"))
+}
+par(mfrow = c(1, 1))
+```
+
+The boxplots reveal distinct patterns in the distribution of these $9$ variables across the two groups, "Cancer" and "Non-Cancer". Notably, $X201290_at$ and $X200047_s_at$ show higher median values for the "Cancer" group, while $X201480_s_at$ and $X217844_at$ have higher medians for the "Non-Cancer" group. These disparities suggest that these variables may be valuable predictors in distinguishing between the two groups.
+
+
+
+```{r}
+# Build the classification tree with cp = 0.01
+tree_model <- rpart(Y~., data=prostate, control = rpart.control(cp = 0.01))
+
+# Plot the tree
+rpart.plot(tree_model, main = "Classification Tree with cp = 0.01")
+```
+The number of terminal nodes in this tree is equal to $4$, as we can see in the graph. We can also find it with command below:
+```{r}
+n_terminal <- sum(tree_model$frame$var == "<leaf>")
+n_terminal 
+```
+
+
+From this tree, we can write mathematically the form of $Region 2$ and $Region 4$ as:
+$$
+R_2 = \lbrace X \in \mathcal{X}^{500}(prostate) \mid X201290_{at} \geq 1.1, X214008_{at} \geq -0.29 \rbrace
+$$
+And 
+$$
+R_4 = \lbrace X \in \mathcal{X}^{500}(prostate) \mid X201290_{at} < 1.1, X209048_{s_{at}} < -0.063 \rbrace
+$$
+While X201290_at is the most important feature according to the t9_feats vector, its position at the root of the tree further reinforces its significance with a Kruskal-Wallis score of 12.23320 (one of the highest in t9_feats). X214008_at and X209048_s_at have moderate importance scores, suggesting that they contribute to the model's performance but to a lesser extent than the top-performing features.
+
+Then we are also going to check the weakest variables.
+```{r}
+# Sort the results in ascending order to identify the weakest variables
+s_kr2 <- sort(kruskal_test, decreasing = FALSE)
+
+# The 9 weakest variables
+w9_feats <- names(s_kr2)[1:9]
+
+# Clean the variable names to match the dataset
+w9_feats <- gsub("\\.Kruskal-Wallis chi-squared", "", w9_feats)
+
+# Generate comparative boxplots
+par(mfrow = c(3, 3))
+for (j in w9_feats) {
+  boxplot(X[[j]] ~ y, main = j, 
+          xlab = "prostate$Y", 
+          ylab = "Value", 
+          col = c("lightblue", "lightcoral"), 
+          names = c("Cancer", "Non-Cancer"))
+}
+par(mfrow = c(1, 1))
+```
+
+As we can see in terms of the weakest variables, it appears that these variables may not have strong discriminatory power between the two groups. The medians of the two groups are often quite close, further indicating that these variables may not be effective in separating the groups.
+
+
+```{r}
+# Correlation between the top 9 variables
+
+t9_data <- X[, names(t9_feats)]
+cor_matrix_t9 <- cor(t9_data)
+
+# Plot correlation matrix
+corrplot(cor_matrix_t9, method = "circle", type = "upper", order = "hclust", tl.cex = 0.6, tl.srt = 45)
+```
+
+This correlation plot provides a visual representation of the pairwise correlations between the predictor variables.
+
+- The pairs of variables X201290_at and X200047_s_at, as well as X211935_at and X200047_s_at, exhibit strong positive correlations. This indicates that these variables tend to move in the same direction.
+
+- For negative correlations, the pair X201290_at and X209454_s_at shows the strongest negative relationship. Additionally, X201290_at has moderate negative correlations with X214001_x_at and X201480_s_at.
+
+- Finally, X212640_at and X217844_at show no significant correlation, indicating that they are not strongly related.
+
+Data that contains high correlations can degrade model performance. This is due to a condition known as multicollinearity, where predictor variables are highly correlated with each other. Multicollinearity can lead to unstable model estimates, difficulties in interpreting the importance of individual variables, and reduced predictive accuracy.
+
+Eigendecomposition of the correlation matrix
+```{r}
+egv_t9 <- eigen(cor_matrix_t9)$values
+
+# Compute the ratio of the largest to the smallest eigenvalue
+lambda_max <- max(egv_t9)
+lambda_min <- min(egv_t9)
+lambda_ratio <- lambda_max / lambda_min
+
+lambda_ratio
+```
+A $\lambda_{max}/\lambda_{min}$ ratio of $17.02747$ is relatively high, indicating a significant spread in the eigenvalues. In fact, a high ratio indicates that the eigenvalues are spread out, suggesting potential multicollinearity issues in the data. In this case, this suggests that there might be some degree of multicollinearity among the predictor variables.
+
+
+In light of the above EAD, let's now implement the algorithms on our models.
+```{r}
+# k-NN models
+knn_1 <- knn(X, X, y, k = 1)
+knn_7 <- knn(X, X, y, k = 7)
+knn_9 <- knn(X, X, y, k = 9)
+
+# Decision tree models
+tree_cp0 <- rpart(Y ~ ., prostate, control = rpart.control(cp = 0))
+tree_cp005 <- rpart(Y ~ ., prostate, control = rpart.control(cp = 0.05))
+tree_cp01 <- rpart(Y ~ ., prostate, control = rpart.control(cp = 0.1))
+
+# Generate ROC curves for all models
+pred_knn_1 <- prediction(as.numeric(knn_1), y)
+pred_knn_7 <- prediction(as.numeric(knn_7), y)
+pred_knn_9 <- prediction(as.numeric(knn_9), y)
+pred_tree_cp0 <- prediction(predict(tree_cp0, type = "prob")[, 2], y)
+pred_tree_cp005 <- prediction(predict(tree_cp005, type = "prob")[, 2], y)
+pred_tree_cp01 <- prediction(predict(tree_cp01, type = "prob")[, 2], y)
+
+# Plot ROC curves
+par(mfrow = c(2, 3))
+plot(performance(pred_knn_1, "tpr", "fpr"), 
+     col = "blue", lwd = 2, 
+     main = "1-NN", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+
+plot(performance(pred_knn_7, "tpr", "fpr"), 
+     col = "green", lwd = 2, 
+     main = "7-NN", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+
+plot(performance(pred_knn_9, "tpr", "fpr"), 
+     col = "red", lwd = 2, 
+     main = "9-NN", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+
+plot(performance(pred_tree_cp0, "tpr", "fpr"), 
+     col = "purple", lwd = 2, 
+     main = "Tree (cp=0)", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+
+plot(performance(pred_tree_cp005, "tpr", "fpr"), 
+     col = "orange", lwd = 2, 
+     main = "Tree (cp=0.05)", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+
+plot(performance(pred_tree_cp01, "tpr", "fpr"), 
+     col = "cyan", lwd = 2, 
+     main = "Tree (cp=0.1)", 
+     xlab = "FPR", 
+     ylab = "TPR", 
+     ylim = c(0, 1), xlim = c(0, 1))
+abline(a = 0, b = 1, col = "gray", lty = 2)
+par(mfrow = c(1, 1))
+
+```
+Qt13:
+
+- $1-NN$ perfect performance $(AUC = 1.0)$. This suggests the model perfectly separates the classes. this is consistent with $1-NN'$s nature, as it overfits to training data and memorizes all points. As expected, perfect training accuracy and overfitting result in an excellent ROC curve. However, this may not generalize well to unseen data.
+
+- $7$-NN and $9$-NN: Degraded performance compared to $1$-NN, with AUC values closer to $0.5$-$0.8$. This aligns with theoretical expectations: increasing $k$ smooths the decision boundary, reducing sensitivity to individual data points but potentially leading to underfitting.
+
+- Decision Trees ($cp=0$, $cp=0.05$ and $cp=0.1$):
+$cp=0$: Higher AUC, indicating better performance due to the lack of pruning (fully grown tree). Overfitting may occur but seems to generalize well for this dataset.
+
+$cp=0.05$ and $cp=0.05$: Slight reduction in AUC, suggesting pruning simplifies the tree, potentially introducing bias but improving generalization.
+
+```{r}
+# Plot Trees
+prp(tree_cp0, main = "Tree (cp=0)")
+prp(tree_cp005, main = "Tree (cp=0.05)")
+prp(tree_cp01, main = "Tree (cp=0.1)")
+```
+
+Now we are going to express this along with a 7/10 training and 3/10 test basic stochastic holdout split of the data, and compute S = 100 replicated random splits of the test error for all the above learning machines. This allows us to compute a more reliable measure of the performance of the machine learning models. The idea is to evaluate the robustness of the model by testing it multiple times on different portions of the data, which helps better estimate the average test error and reduce the risk of bias.
+```{r}
+S <- 100
+errors <- data.frame(matrix(0, ncol = 6, nrow = S))
+colnames(errors) <- c("1-NN", "7-NN", "9-NN", "Tree(cp=0)", "Tree(cp=0.05)", "Tree(cp=0.1)")
+
+for (i in 1:S) {
+  # Split data into training and testing
+  train_index <- sample(1:nrow(prostate), size = 0.7 * nrow(prostate))
+  train_data <- prostate[train_index, ]
+  test_data <- prostate[-train_index, ]
+  
+  # Prepare features and responses
+  X_train <- scale(train_data[, -which(names(train_data) == "Y")]) # Standardize
+  y_train <- as.factor(train_data$Y)
+  X_test <- scale(test_data[, -which(names(test_data) == "Y")], center = attr(X_train, "scaled:center"), scale = attr(X_train, "scaled:scale"))
+  y_test <- as.factor(test_data$Y)
+  
+  # Factor levels for the response
+  levels(y_train) <- levels(y_test)
+  
+  # Train models and calculate test errors
+  knn_1 <- knn(X_train, X_test, y_train, k = 1)
+  knn_7 <- knn(X_train, X_test, y_train, k = 7)
+  knn_9 <- knn(X_train, X_test, y_train, k = 9)
+  tree_cp0 <- rpart(Y ~ ., data = train_data, control = rpart.control(cp = 0))
+  tree_cp005 <- rpart(Y ~ ., data = train_data, control = rpart.control(cp = 0.05))
+  tree_cp01 <- rpart(Y ~ ., data = train_data, control = rpart.control(cp = 0.1))
+  
+  # Compute test errors
+  errors[i, 1] <- mean(knn_1 != y_test)
+  errors[i, 2] <- mean(knn_7 != y_test)
+  errors[i, 3] <- mean(knn_9 != y_test)
+  errors[i, 4] <- mean(predict(tree_cp0, test_data, type = "class") != y_test)
+  errors[i, 5] <- mean(predict(tree_cp005, test_data, type = "class") != y_test)
+  errors[i, 6] <- mean(predict(tree_cp01, test_data, type = "class") != y_test)
+}
+
+
+# Plot boxplots
+box_colors <- colorRampPalette(c("blue", "green", "yellow", "orange", "red"))(ncol(errors))
+boxplot(errors, 
+        main = "Test Error Distribution for 100 Replicated Splits", 
+        col = box_colors, xlab = "Models", ylab = "Error Rate", 
+        border = "black", outline = FALSE)
+
+```
+
+The graph shows that no model stands out clearly in terms of performance with standardization to have a mean of 0 and a standard deviation of 1.
+
+\textbf{1-NN}: This model exhibits a relatively high median, comparable to the $7$-NN and $9$-NN models, but with substantial variability in the test error. This is expected, as $1$-NN is highly sensitive to noise and small fluctuations in the data, which makes it prone to overfitting.
+
+\textbf{7-NN and 9-NN}: These models display narrower interquartile ranges (IQRs), indicating more stable and consistent performance compared to the $1$-NN model. The reduced variability suggests better generalization, as these models are less sensitive to small changes in the data.
+
+For the decision tree models, increasing the complexity parameter ($cp$) from $0$ to $0.1$ reduces model complexity, which results in a slight increase in variance and improved stability, but at the cost of a small increase in bias. Despite these adjustments, the overall median rates for the decision tree models remain similar.
+
+In conclusion, the k-NN models generally outperform the decision tree models, as they show more consistent performance with lower overall error rates.
+
+```{r}
+# Data for ANOVA
+errors_a <- reshape2::melt(errors, variable.name = "Model", value.name = "TestError")
+
+# Summary of ANOVA
+summary(aov(TestError ~ Model, data = errors_a))
+```
+
+The ANOVA shows that there is a significant difference between the test errors of the different models, as the p-value is much lower than 0.05 $(5.54e-05)$. The F value $(5.524)$ is also high, suggesting that the variation explained by the models is much greater than the residual variation due to errors.
+
+This means that the performances of the different models are statistically different, and you can conclude that some models have significantly lower test errors than others.
+
+
+
+This analysis highlights the trade-off between model complexity and generalization. The $1-NN$ model achieves near-perfect performance on the training set with an AUC of approximately $1.0$, which reflects its tendency to overfit the training data. While it performs excellently on the training set, it may not generalize well to unseen data. On the other hand, the $7-NN$ and $9-NN$ models show more stable performance, with AUC values ranging from $0.5$ to $0.8$, which aligns with the expectation that increasing $k$ reduces sensitivity to individual data points and smoothens the decision boundary, but at the cost of slightly lower accuracy.
+
+For the decision tree models, the fully grown tree ($cp = 0$) has a higher AUC, indicating better performance due to its complexity, though it might overfit. As the complexity of the tree is reduced (with $ cp = 0.05$ and $cp = 0.1$), the AUC slightly decreases, suggesting that pruning the tree improves generalization by reducing overfitting, but at the cost of introducing some bias. 
+
+In summary, the $k-NN$ models, especially with moderate $ k $ values, and the pruned decision tree models strike a better balance between complexity and performance, ensuring better generalization on new, unseen data. The ANOVA results confirm that the differences in performance are statistically significant (p-value = $5.54e-05$, F-value = $5.524$), emphasizing the impact of model choice on test error.
